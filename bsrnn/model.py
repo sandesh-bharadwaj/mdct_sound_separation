@@ -3,12 +3,62 @@ import torch.nn as nn
 import numpy as np
 from einops.layers.torch import Rearrange
 from einops import rearrange
-
+import lightning.pytorch as pylightning
 '''
 This is a modified implementation of the paper Music Source Separation with Band-Split RNN
 Instead of using STFT on the audio waveform, we instead apply the Modified DCT Transform (DCT Type-IV with windowing) as 
 an input transform and replace the standard L1 loss with noise-invariant loss introduced in CLIPSep.
 '''
+
+# PyTorch Lightning Trainer
+class BSRNNLightning(pylightning.LightningModule):
+    def __init__(self, target_stem, sample_rate, n_fft, hop_length, channels=2,
+                 fc_dim=128, num_band_seq_module=12, model_type="vocals",
+                 **kwargs):
+        super().__init__()
+        stem_list = ['mix', 'drums', 'bass', 'other', 'vocals']
+        stem_dict = {stem: i for i, stem in enumerate(stem_list)}
+        self.target_stem_idx = stem_dict[target_stem]
+
+        # FFT params
+        self.sample_rate = sample_rate
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.channels = channels
+
+        if model_type == "drums":
+            bands = [1000, 2000, 4000, 8000, 16000]
+            num_subBands = [20, 10, 8, 8, 8, 1]
+        elif model_type == "bass":
+            bands = [500, 1000, 4000, 8000, 16000]
+            num_subBands = [10, 5, 6, 4, 4, 1]
+        else:
+            # V7 band splitting
+            bands = [1000, 4000, 8000, 16000, 20000]
+            num_subBands = [10, 12, 8, 8, 2, 1]
+
+        self.bandSplitter = BandSplitModule(sample_rate=sample_rate, n_fft=n_fft, channels=self.channels,
+                                            fc_dim=fc_dim, bands=bands, num_subBands=num_subBands)
+        self.bandSeqModeling = nn.Sequential(
+            *[BandSequenceModelingModule(channels=channels, fc_dim=fc_dim,
+                                         num_subBands=num_subBands)
+              for _ in range(num_band_seq_module)]
+        )
+        self.maskEstimator = MaskEstimationModule(sample_rate=sample_rate, n_fft=n_fft, channels=channels,
+                                                  fc_dim=fc_dim,
+                                                  bands=bands, num_subBands=num_subBands)
+
+    def training_step(self, batch, batch_idx):
+        x,y = batch
+        loss = 0
+        return loss
+
+    def configure_optimizers(self, lr=1e-3):
+        optimizer = torch.optim.Adam(self.parameters(),lr=lr)
+        return optimizer
+
+
+
 
 class BSRNN(nn.Module):
     def __init__(self, target_stem, sample_rate, n_fft, hop_length, channels=2,
