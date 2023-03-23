@@ -6,7 +6,7 @@ from einops import rearrange
 
 '''
 This is a modified implementation of the paper Music Source Separation with Band-Split RNN
-Instead of using STFT on the audio waveform, we instead apply the Modified DCT Transform (DCT Type-IV) as 
+Instead of using STFT on the audio waveform, we instead apply the Modified DCT Transform (DCT Type-IV with windowing) as 
 an input transform and replace the standard L1 loss with noise-invariant loss introduced in CLIPSep.
 '''
 
@@ -26,9 +26,11 @@ class BSRNN(nn.Module):
         self.channels = channels
 
         if model_type == "drums":
-            pass
+            bands = [1000, 2000, 4000, 8000, 16000]
+            num_subBands = [20, 10, 8, 8, 8, 1]
         elif model_type == "bass":
-            pass
+            bands = [500, 1000, 4000, 8000, 16000]
+            num_subBands = [10, 5, 6, 4, 4, 1]
         else:
             # V7 band splitting
             bands = [1000, 4000, 8000, 16000, 20000]
@@ -49,26 +51,17 @@ class BSRNN(nn.Module):
         b, c, t = wav.shape
         wav = rearrange(wav, 'b c t -> (b c) t')
         spec = torch_mdct(wav, window_length=self.n_fft, window_type='kbd')
-        # spec = torch.stft(wav, n_fft=self.n_fft, hop_length=self.hop_length,
-        #                   window=torch.hann_window(self.n_fft).to(wav.device), return_complex=False)
         spec_ = rearrange(spec, '(b c) f t -> b f t c', c=self.channels)
         z = self.bandSplitter(spec_)
         q = self.bandSeqModeling(z)
         mask = self.maskEstimator(q)
 
-        # cspec = torch.view_as_complex(spec)
-        # cmask = torch.view_as_complex(mask)
-        # est_cspec = cmask * cspec
-        # est_wav = torch.istft(est_cspec, n_fft=self.n_fft, hop_length=self.hop_length,
-        #                       window=torch.hann_window(self.n_fft).to(wav.device))
+        est_spec = mask * spec
 
-        #MDCT change
-        est_cspec = mask * spec
-        est_wav = torch_imdct(est_cspec, sample_length=6 * self.sample_rate, window_length=self.n_fft,
+        est_wav = torch_imdct(est_spec, sample_length=t, window_length=self.n_fft,
                               window_type='kbd')
-        # est_spec = torch.view_as_real(est_cspec)
-        est_spec = est_cspec
         est_wav = rearrange(est_wav, '(b c) t -> b c t', b=b, c=c)
+        est_wav = est_wav[:, :, :t]
         est_spec = rearrange(est_spec, '(b c) f t -> b c f t', c=self.channels)
         return est_spec, est_wav, torch.abs(mask)
 
@@ -146,7 +139,6 @@ class MaskEstimationModule(nn.Module):
         super().__init__()
         self.bands = createFreqBands(sample_rate, n_fft, bands, num_subBands)
         self.band_intervals = self.bands[1:] - self.bands[:-1]
-        num_total_subBands = len(self.bands) - 1
         self.channels = channels
         fc_dim = fc_dim * channels
         hidden_dim = 4 * fc_dim
@@ -227,13 +219,14 @@ class mdctFunc(torch.autograd.Function):
 class imdctFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_mdct, sample_length, window_length, window_type="kbd"):
+        # Kaiser–Bessel-derived (KBD) window
         if window_type == "kbd":
             alpha = 5
             kbd_win_func = np.kaiser(int(window_length / 2) + 1, alpha * torch.pi)
             kbd_cumSum_win_func = np.cumsum(kbd_win_func[1:int(window_length / 2)])
             win_func = np.sqrt(np.concatenate((kbd_cumSum_win_func, np.flip(kbd_cumSum_win_func, [0])), 0)
                                / np.sum(kbd_win_func))
-        # Window function used in Vorbis audio coding
+        # Vorbis window
         elif window_type == "vorbis":
             win_func = np.sin(np.pi / 2 * np.pow(np.sin(np.pi / window_length *
                                                         np.arange(0.5, window_length + 0.5)), 2))
