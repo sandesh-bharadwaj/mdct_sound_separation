@@ -160,16 +160,16 @@ class Solver:
         with torch.no_grad():
             metrics = dict(sdr_track=[])
             for idx, batch in enumerate(tqdm(self.valid_loader, desc=f"Valid Epoch: {epoch}")):
-                mixture, sources, target_stems = batch
+                mixture, sources, target_stems = [i.to(self.device) for i in batch]
                 mix_args = list(mixture.shape)
-                mixture_spec = self.prepare_input_wav(mixture)
-                est_mask = self.model(mixture_spec)
-                est_wav = self.extract_output(mixture_spec, est_mask, mix_args)
-                target_wav = target_stems[0]
+                mixture = self.prepare_input_wav(mixture)
+                est_mask = self.model(mixture)
+                est_wav = self.extract_output(mixture, est_mask, mix_args)
+                target_stems = target_stems[0]
                 """
                 Validation Metrics
                 """
-                scores = calc_metrics(target_wav, est_wav)
+                scores = calc_metrics(target_stems, est_wav)
                 metrics['sdr_track'] += scores
 
                 if not self.args.debug:
@@ -190,8 +190,8 @@ class Solver:
     def prepare_input_wav(self, wav):
         wav = rearrange(wav, 'b c t -> (b c) t')
         spec = torch_mdct(wav, window_length=self.args.n_fft, window_type='kbd')
-        spec_ = rearrange(spec, '(b c) f t -> b f t c', c=self.args.channels)
-        return spec_
+        spec = rearrange(spec, '(b c) f t -> b f t c', c=self.args.channels)
+        return spec
 
     def extract_output(self, spec, mask, mix_args):
         b, c, t = mix_args
@@ -207,10 +207,8 @@ class Solver:
     def calculate_gt_masks_mixOfMix(self, sources, target_stems):
         target_masks = []
         for j in range(self.args.num_mixtures):
-            mix_stem = sources[:, j]
-            target_stem = target_stems[:, j]
-            mix_spec = rearrange(self.prepare_input_wav(mix_stem), 'b f t c -> (b c) f t')
-            target_spec = rearrange(self.prepare_input_wav(target_stem), 'b f t c -> (b c) f t')
+            mix_spec = rearrange(self.prepare_input_wav(sources[:, j]), 'b f t c -> (b c) f t')
+            target_spec = rearrange(self.prepare_input_wav(target_stems[:, j]), 'b f t c -> (b c) f t')
             gt_mask = target_spec / mix_spec
             target_masks.append(gt_mask)
         target_masks = torch.stack(target_masks)
