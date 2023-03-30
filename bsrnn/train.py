@@ -94,10 +94,10 @@ class Solver:
                 # print(est_wavs.shape,est_specs.shape)
 
                 # Compute noise-invariant loss
-                loss_00_0 = calc_loss(pred_mask[0], pred_mask[2], gt_masks[:, 0], weight)
-                loss_11_1 = calc_loss(pred_mask[1], pred_mask[3], gt_masks[:, 1], weight)
-                loss_01_0 = calc_loss(pred_mask[0], pred_mask[3], gt_masks[:, 0], weight)
-                loss_10_1 = calc_loss(pred_mask[1], pred_mask[2], gt_masks[:, 1], weight)
+                loss_00_0 = calc_loss(pred_mask[0], pred_mask[2], gt_masks[0], weight)
+                loss_11_1 = calc_loss(pred_mask[1], pred_mask[3], gt_masks[1], weight)
+                loss_01_0 = calc_loss(pred_mask[0], pred_mask[3], gt_masks[0], weight)
+                loss_10_1 = calc_loss(pred_mask[1], pred_mask[2], gt_masks[1], weight)
                 loss_0 = (loss_00_0 + loss_11_1) / 2
                 loss_1 = (loss_01_0 + loss_10_1) / 2
                 noiseInvLoss = torch.mean(torch.minimum(loss_0, loss_1))
@@ -127,6 +127,8 @@ class Solver:
             scaler.step(self.optimizer)
             scaler.update()
 
+            # print(metrics['sdr_1'], type(metrics['sdr_1']), metrics['sdr_1'].shape)
+
             """
             WANDB LOGGING
             """
@@ -135,8 +137,8 @@ class Solver:
                     'epoch': epoch,
                     'learning_rate': lr_cur,
                     'train loss': noiseInvLoss.item(),
-                    'SDR 1': metrics['sdr_1'].item(),
-                    'SDR 2': metrics['sdr_2'].item(),
+                    'SDR 1': metrics['sdr_1'],
+                    'SDR 2': metrics['sdr_2'],
                 })
 
             if self.args.debug:

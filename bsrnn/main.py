@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument('--num-band-seq-module', type=int, default=12)
 
     # Training parameters
-    parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--batch-size', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--lr-decay', type=float, default=0.98)
     parser.add_argument('--lambda-spec', type=float, default=0.5)

@@ -403,6 +403,7 @@ def calc_loss(x, n, gt, weight):
     else:
         pred_mask = 1 - nn.functional.relu(1-(torch.sigmoid(x) + torch.sigmoid(n)))
     BCELoss = nn.BCEWithLogitsLoss(weight=weight, reduction="none")
+    print(x.shape,n.shape,gt.shape,pred_mask.shape)
     return torch.mean(
         BCELoss(pred_mask, gt),
         (1,2)
