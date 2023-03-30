@@ -7,11 +7,10 @@ import torch.nn.functional as F
 import wandb
 import numpy as np
 import random
-from utils import augment
 import os
 from natsort import natsorted
 from glob import glob
-from utils import torch_mdct, torch_imdct
+from utils import torch_mdct, torch_imdct, calc_loss
 from metrics import calc_metrics
 
 
@@ -76,12 +75,14 @@ class Solver:
             self.optimizer.zero_grad()
 
             mixture, sources, target_stems = [i.to(self.device) for i in batch]
-            target_masks = self.calculate_gt_masks_mixOfMix(sources, target_stems)
+            gt_masks = self.calculate_gt_masks_mixOfMix(sources, target_stems)
+            # print("GTMASKS:", gt_masks.shape)
+            # print("Target stems:",target_stems.shape)
             mix_args = list(mixture.shape)
             mixture_spec = self.prepare_input_wav(mixture)
 
             with torch.cuda.amp.autocast():
-                est_mask = self.model(mixture_spec)
+                pred_mask = self.model(mixture_spec)
                 if self.args.use_weighted_loss:
                     mixture_spec_ = rearrange(mixture_spec, 'b f t c -> (b c) f t')
                     weight = torch.log1p(torch.abs(mixture_spec_))
@@ -89,23 +90,32 @@ class Solver:
                 else:
                     weight = torch.ones_like(mixture_spec)
 
-                est_spec, est_wav = self.extract_output(mixture_spec, est_mask, mix_args)
+                est_specs, est_wavs = self.extract_output(mixture_spec, pred_mask[:2], mix_args)
+                # print(est_wavs.shape,est_specs.shape)
 
                 # Compute noise-invariant loss
-                noiseInvLoss = torch.mean(
-                    torch.stack(
-                        [
-                            F.binary_cross_entropy_with_logits(torch.sigmoid(est_mask), torch.sigmoid(target_masks[i]),
-                                                               weight)
-                            for i in range(self.args.num_mixtures)
-                        ]
-                    )
-                )
+                loss_00_0 = calc_loss(pred_mask[0], pred_mask[2], gt_masks[:, 0], weight)
+                loss_11_1 = calc_loss(pred_mask[1], pred_mask[3], gt_masks[:, 1], weight)
+                loss_01_0 = calc_loss(pred_mask[0], pred_mask[3], gt_masks[:, 0], weight)
+                loss_10_1 = calc_loss(pred_mask[1], pred_mask[2], gt_masks[:, 1], weight)
+                loss_0 = (loss_00_0 + loss_11_1) / 2
+                loss_1 = (loss_01_0 + loss_10_1) / 2
+                noiseInvLoss = torch.mean(torch.minimum(loss_0, loss_1))
+
+                # noiseInvLoss = torch.mean(
+                #     torch.stack(
+                #         [
+                #             F.binary_cross_entropy_with_logits(torch.sigmoid(est_mask), torch.sigmoid(gt_masks[i]),
+                #                                                weight)
+                #             for i in range(self.args.num_mixtures)
+                #         ]
+                #     )
+                # )
 
             """ 
             METRICS 
             """
-            metric_scores = [calc_metrics(target_stems[i], est_wav) for i in range(self.args.num_mixtures)]
+            metric_scores = [calc_metrics(target_stems[:, i], est_wavs[i]) for i in range(self.args.num_mixtures)]
             metrics['sdr_1'] = metric_scores[0]
             metrics['sdr_2'] = metric_scores[1]
 
@@ -125,8 +135,8 @@ class Solver:
                     'epoch': epoch,
                     'learning_rate': lr_cur,
                     'train loss': noiseInvLoss.item(),
-                    'SDR 1': metrics['sdr_1'],
-                    'SDR 2': metrics['sdr_2'],
+                    'SDR 1': metrics['sdr_1'].item(),
+                    'SDR 2': metrics['sdr_2'].item(),
                 })
 
             if self.args.debug:
@@ -142,14 +152,15 @@ class Solver:
             if not self.args.debug:
                 target_stems = [rearrange(target_stems[:, i], 'b c t -> b t c').detach().cpu().numpy()[0]
                                 for i in range(self.args.num_mixtures)]
-                est_wav = rearrange(est_wav, 'b c t -> b t c').detach().cpu().numpy()[0]
-                mix_wav = rearrange(mixture, 'b c t -> b t c').detach().cpu().numpy()[0]
-                est_mask = est_mask.detach().cpu().numpy()[0]
+                est_wavs = rearrange(est_wavs, 'n b c t -> n b t c').detach().cpu().numpy()[:,0]
+
+                mixture = rearrange(mixture, 'b c t -> b t c').detach().cpu().numpy()[0]
                 wandb.log({
                     'Train target wav 1': wandb.Audio(target_stems[0], sample_rate=self.args.sample_rate),
                     'Train target wav 2': wandb.Audio(target_stems[1], sample_rate=self.args.sample_rate),
-                    'Train est wav': wandb.Audio(est_wav, sample_rate=self.args.sample_rate),
-                    'Train mix wav': wandb.Audio(mix_wav, sample_rate=self.args.sample_rate)
+                    'Train est wav 1': wandb.Audio(est_wavs[0], sample_rate=self.args.sample_rate),
+                    'Train est wav 2': wandb.Audio(est_wavs[1], sample_rate=self.args.sample_rate),
+                    'Train mix wav': wandb.Audio(mixture, sample_rate=self.args.sample_rate)
                 })
 
     def valid_epoch(self, epoch):
@@ -178,7 +189,7 @@ class Solver:
                 if self.args.debug:
                     print("VALIDATION")
                     print('epoch:', epoch,
-                          'sdr_track:', scores)
+                          'validation_sdr:', scores)
                     if idx > 5:
                         break
 
@@ -196,20 +207,27 @@ class Solver:
     def extract_output(self, spec, mask, mix_args):
         b, c, t = mix_args
         spec = rearrange(spec, 'b f t c -> (b c) f t', b=b, c=c)
-        est_spec = mask * spec
-        est_wav = torch_imdct(est_spec, sample_length=t, window_length=self.args.n_fft,
-                              window_type='kbd')
-        est_wav = rearrange(est_wav, '(b c) t -> b c t', b=b, c=c)
-        est_wav = est_wav[:, :, :t]
-        est_spec = rearrange(est_spec, '(b c) f t -> b c f t', c=c)
-        return est_spec, est_wav
+        est_specs = []
+        est_wavs = []
+        for i in range(mask.shape[0]):
+            est_spec = mask[i] * spec
+            est_wav = torch_imdct(est_spec, sample_length=t, window_length=self.args.n_fft,
+                                  window_type='kbd')
+            est_wav = rearrange(est_wav, '(b c) t -> b c t', b=b, c=c)
+            est_wav = est_wav[:, :, :t]
+            est_spec = rearrange(est_spec, '(b c) f t -> b c f t', c=c)
+            est_specs.append(est_spec)
+            est_wavs.append(est_wav)
+        est_specs = torch.stack(est_specs)
+        est_wavs = torch.stack(est_wavs)
+        return est_specs, est_wavs
 
     def calculate_gt_masks_mixOfMix(self, sources, target_stems):
-        target_masks = []
+        gt_masks = []
         for j in range(self.args.num_mixtures):
             mix_spec = rearrange(self.prepare_input_wav(sources[:, j]), 'b f t c -> (b c) f t')
             target_spec = rearrange(self.prepare_input_wav(target_stems[:, j]), 'b f t c -> (b c) f t')
             gt_mask = target_spec / mix_spec
-            target_masks.append(gt_mask)
-        target_masks = torch.stack(target_masks)
-        return target_masks
+            gt_masks.append(gt_mask)
+        gt_masks = torch.stack(gt_masks)
+        return gt_masks

@@ -391,3 +391,19 @@ class FlipSign(nn.Module):
 def augment():
     augments = [FlipChannels(), FlipSign()]
     return torch.nn.Sequential(*augments)
+
+
+
+# Noise Invariant Loss Calculation
+def calc_loss(x, n, gt, weight):
+    if n is None:
+        pred_mask = torch.sigmoid(x)
+    elif x is None:
+        pred_mask = torch.sigmoid(n)
+    else:
+        pred_mask = 1 - nn.functional.relu(1-(torch.sigmoid(x) + torch.sigmoid(n)))
+    BCELoss = nn.BCEWithLogitsLoss(weight=weight, reduction="none")
+    return torch.mean(
+        BCELoss(pred_mask, gt),
+        (1,2)
+    )

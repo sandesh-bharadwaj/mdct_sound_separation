@@ -65,7 +65,7 @@ class BSRNNLightning(pylightning.LightningModule):
 
 class BSRNN(nn.Module):
     def __init__(self, target_stem, sample_rate, n_fft, hop_length, channels=2,
-                 fc_dim=128, num_band_seq_module=12,
+                 fc_dim=128, num_band_seq_module=12, num_mixtures=2,
                  **kwargs):
         super().__init__()
         stem_list = ['mix', 'drums', 'bass', 'other', 'vocals']
@@ -77,6 +77,7 @@ class BSRNN(nn.Module):
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.channels = channels
+        self.num_mixtures = num_mixtures
 
         if target_stem == "drums":
             bands = [1000, 2000, 4000, 8000, 16000]
@@ -98,16 +99,16 @@ class BSRNN(nn.Module):
         )
         self.maskEstimator = MaskEstimationModule(sample_rate=sample_rate, n_fft=n_fft, channels=channels,
                                                   fc_dim=fc_dim,
-                                                  bands=bands, num_subBands=num_subBands)
+                                                  bands=bands, num_subBands=num_subBands, num_mixtures=num_mixtures)
 
     def forward(self, spec_):
         # b, c, t = wav.shape
         # wav = rearrange(wav, 'b c t -> (b c) t')
         # spec = torch_mdct(wav, window_length=self.n_fft, window_type='kbd')
         # spec_ = rearrange(spec, '(b c) f t -> b f t c', c=self.channels)
-        z = self.bandSplitter(spec_)
-        q = self.bandSeqModeling(z)
-        mask = self.maskEstimator(q)
+        out = self.bandSplitter(spec_)
+        out = self.bandSeqModeling(out)
+        out = self.maskEstimator(out)
 
         # est_spec = mask * spec
         #
@@ -116,7 +117,7 @@ class BSRNN(nn.Module):
         # est_wav = rearrange(est_wav, '(b c) t -> b c t', b=b, c=c)
         # est_wav = est_wav[:, :, :t]
         # est_spec = rearrange(est_spec, '(b c) f t -> b c f t', c=self.channels)
-        return mask
+        return out
 
 
 class BandSplitModule(nn.Module):
@@ -188,13 +189,14 @@ class BandSequenceModelingModule(nn.Module):
 
 class MaskEstimationModule(nn.Module):
     def __init__(self, sample_rate, n_fft, channels=2, fc_dim=128,
-                 bands=[1000, 4000, 8000, 16000, 20000], num_subBands=[10, 12, 8, 8, 2, 1]):
+                 bands=[1000, 4000, 8000, 16000, 20000], num_subBands=[10, 12, 8, 8, 2, 1], num_mixtures=2):
         super().__init__()
         self.bands = createFreqBands(sample_rate, n_fft, bands, num_subBands)
         self.band_intervals = self.bands[1:] - self.bands[:-1]
         self.channels = channels
+        self.num_mixtures = num_mixtures
         fc_dim = fc_dim * channels
-        hidden_dim = 4 * fc_dim
+        hidden_dim = self.num_mixtures * 4 * fc_dim
 
         self.layer_list = nn.ModuleList([
             nn.Sequential(
@@ -202,7 +204,7 @@ class MaskEstimationModule(nn.Module):
                 nn.LayerNorm(fc_dim),
                 nn.Linear(fc_dim, hidden_dim),
                 nn.Tanh(),
-                nn.Linear(hidden_dim, band_interval * channels)
+                nn.Linear(hidden_dim, 2 * num_mixtures * band_interval * channels)
             ) for band_interval in self.band_intervals
         ])
 
@@ -210,10 +212,11 @@ class MaskEstimationModule(nn.Module):
         outputs = []
         for i in range(len(self.band_intervals)):
             output = self.layer_list[i](q[:, :, i, :])
-            output = rearrange(output, 'b t (f c) -> (b c) f t', c=self.channels)
+            output = rearrange(output, 'b t (f c) -> (b c) f t', c=2*self.num_mixtures*self.channels)
             outputs.append(output)
-        mask = torch.cat(outputs, dim=-2)
-        return mask
+        outputs = torch.cat(outputs, dim=-2)
+        outputs = rearrange(outputs, '(b c n) f t -> n (b c) f t', c=self.channels, n=2*self.num_mixtures)
+        return outputs
 
 
 # Class to extract LSTM output separately
@@ -240,4 +243,10 @@ if __name__ == '__main__':
     bsrnn = BSRNN('vocals', sr, nfft, hop)  # , num_band_seq_module=3
     wav_len = sr * sec
     wav_len = int(wav_len / hop) * hop
-    summary(bsrnn, input_size=(2, 2, wav_len))
+    wav = torch.rand((1, 2, wav_len))
+    wav = rearrange(wav, 'b c t -> (b c) t')
+    spec = torch_mdct(wav, window_length=nfft, window_type='kbd')
+    print(spec.shape)
+    spec = rearrange(spec, '(b c) f t -> b f t c', c=2)
+
+    summary(bsrnn, input_size=spec.shape)
