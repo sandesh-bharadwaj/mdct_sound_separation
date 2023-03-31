@@ -217,7 +217,7 @@ class MaskEstimationModule(nn.Module):
             outputs.append(output)
         outputs = torch.cat(outputs, dim=-2)
         print('Outputs before :', outputs.shape)
-        outputs = rearrange(outputs, '(b c n) f t -> n (b c) f t', c=self.channels, n=2*self.num_mixtures)
+        outputs = rearrange(outputs, '(b c n) f t -> b (n c) f t', c=2*self.channels, n=self.num_mixtures)
         print('Outputs after :', outputs.shape)
         return outputs
 
