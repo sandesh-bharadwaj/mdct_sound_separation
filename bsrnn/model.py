@@ -212,10 +212,13 @@ class MaskEstimationModule(nn.Module):
         outputs = []
         for i in range(len(self.band_intervals)):
             output = self.layer_list[i](q[:, :, i, :])
+            print('Batch size:',output.shape[0])
             output = rearrange(output, 'b t (f c) -> (b c) f t', c=2*self.num_mixtures*self.channels)
             outputs.append(output)
         outputs = torch.cat(outputs, dim=-2)
+        print('Outputs before :', outputs.shape)
         outputs = rearrange(outputs, '(b c n) f t -> n (b c) f t', c=self.channels, n=2*self.num_mixtures)
+        print('Outputs after :', outputs.shape)
         return outputs
 
 
